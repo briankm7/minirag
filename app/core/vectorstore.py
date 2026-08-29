@@ -8,18 +8,12 @@ infrastructure.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 
 from qdrant_client import AsyncQdrantClient, models
 
+from app.core.retrieval import SearchHit
 
-@dataclass(frozen=True)
-class SearchHit:
-    chunk_id: str
-    document_id: str
-    title: str
-    text: str
-    score: float
+__all__ = ["SearchHit", "VectorStore"]
 
 
 class VectorStore:
@@ -103,6 +97,42 @@ class VectorStore:
                 )
             )
         return hits
+
+    async def scroll_all(self, *, batch_size: int = 256) -> list[SearchHit]:
+        """Read every stored chunk, in pages.
+
+        This exists so the lexical index can be rebuilt at startup from the
+        vector store, which is the durable copy. Without it the two retrievers
+        would disagree after any restart: Qdrant would still hold the corpus
+        while the in-memory BM25 index came up empty, and hybrid search would
+        silently degrade to dense-only with no error to notice.
+
+        Scores are zero because nothing has been queried; only the payloads
+        matter here.
+        """
+        hits: list[SearchHit] = []
+        offset = None
+        while True:
+            points, offset = await self._client.scroll(
+                collection_name=self._collection,
+                limit=batch_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = point.payload or {}
+                hits.append(
+                    SearchHit(
+                        chunk_id=str(point.id),
+                        document_id=payload.get("document_id", ""),
+                        title=payload.get("title", ""),
+                        text=payload.get("text", ""),
+                        score=0.0,
+                    )
+                )
+            if offset is None:
+                return hits
 
     async def delete_document(self, document_id: str) -> None:
         await self._client.delete(

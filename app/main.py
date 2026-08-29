@@ -25,6 +25,10 @@ DESCRIPTION = """
 A compact retrieval-augmented generation service: ingest documents, search them
 semantically, and get answers grounded in the retrieved passages.
 
+Retrieval is hybrid by default: dense vector search and BM25 run in parallel,
+their rankings are fused, and a reranker reorders the survivors before the top
+passages are handed to the generator.
+
 External providers sit behind interfaces, so the whole API runs offline with
 deterministic stand-ins when no API keys are configured.
 """
@@ -37,7 +41,12 @@ async def lifespan(app: FastAPI):
     store = build_store(settings)
     await store.ensure_collection()
     app.state.store = store
-    app.state.service = build_service(settings, store)
+    service = build_service(settings, store)
+    # The vector store is the durable copy; the BM25 index lives in memory and
+    # would otherwise come up empty after a restart, silently degrading hybrid
+    # search to dense-only.
+    await service.warm_lexical_index()
+    app.state.service = service
     try:
         yield
     finally:
@@ -80,11 +89,15 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/health", response_model=HealthOut, tags=["system"])
     async def health(request: Request) -> HealthOut:
         settings: Settings = request.app.state.settings
+        service: RagService = request.app.state.service
         return HealthOut(
             status="ok",
             embedding_provider=settings.embedding_provider,
             generation_provider=settings.generation_provider,
+            reranker_provider=settings.reranker_provider,
+            retrieval_mode=settings.retrieval_mode,
             indexed_chunks=await request.app.state.store.count(),
+            lexical_passages=len(service.lexical),
         )
 
     @app.post(
@@ -106,17 +119,20 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/search", response_model=SearchOut, tags=["retrieval"])
     async def search(
-        payload: SearchIn, service: ServiceDep
+        payload: SearchIn, service: ServiceDep, request: Request
     ) -> SearchOut:
-        hits = await service.search(payload.query, limit=payload.limit)
-        return SearchOut(query=payload.query, results=_to_sources(hits))
+        mode = payload.mode or request.app.state.settings.retrieval_mode
+        hits = await service.search(payload.query, limit=payload.limit, mode=mode)
+        return SearchOut(query=payload.query, mode=mode, results=_to_sources(hits))
 
     @app.post("/ask", response_model=AskOut, tags=["retrieval"])
-    async def ask(payload: AskIn, service: ServiceDep) -> AskOut:
-        result = await service.ask(payload.query, limit=payload.limit)
+    async def ask(payload: AskIn, service: ServiceDep, request: Request) -> AskOut:
+        mode = payload.mode or request.app.state.settings.retrieval_mode
+        result = await service.ask(payload.query, limit=payload.limit, mode=mode)
         return AskOut(
             question=payload.query,
             answer=result.answer,
+            mode=mode,
             sources=_to_sources(result.sources),
         )
 

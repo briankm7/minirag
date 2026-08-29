@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     chunk_overlap: int = 80
     top_k: int = 4
 
+    # Retrieval strategy. "hybrid" runs dense and BM25 and fuses the rankings;
+    # the single-retriever modes exist so the two can be compared on the same
+    # corpus without redeploying.
+    retrieval_mode: Literal["dense", "lexical", "hybrid"] = "hybrid"
+    rrf_k: int = 60
+    # Each retriever returns top_k * candidate_multiplier passages before fusion
+    # and reranking. Reranking can only reorder what retrieval returned, so this
+    # is the knob that trades latency for recall.
+    candidate_multiplier: int = 4
+
+    # "lexical" is a cheap offline baseline, not a cross-encoder; see
+    # app/core/reranking.py.
+    reranker_provider: Literal["cohere", "lexical", "none"] = "lexical"
+    cohere_api_key: str | None = None
+    cohere_rerank_model: str = "rerank-v3.5"
+
     request_timeout: float = 30.0
 
 

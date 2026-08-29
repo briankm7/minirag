@@ -9,7 +9,14 @@ from __future__ import annotations
 from app.config import Settings
 from app.core.embeddings import EmbeddingProvider, FakeEmbeddings, GeminiEmbeddings
 from app.core.generation import AnthropicGenerator, FakeGenerator, GenerationProvider
+from app.core.lexical import LexicalIndex
 from app.core.rag import RagService
+from app.core.reranking import (
+    CohereReranker,
+    LexicalReranker,
+    NoopReranker,
+    Reranker,
+)
 from app.core.vectorstore import VectorStore
 
 
@@ -35,6 +42,18 @@ def build_generator(settings: Settings) -> GenerationProvider:
     return FakeGenerator()
 
 
+def build_reranker(settings: Settings) -> Reranker:
+    if settings.reranker_provider == "cohere":
+        return CohereReranker(
+            settings.cohere_api_key or "",
+            model=settings.cohere_rerank_model,
+            timeout=settings.request_timeout,
+        )
+    if settings.reranker_provider == "lexical":
+        return LexicalReranker()
+    return NoopReranker()
+
+
 def build_store(settings: Settings) -> VectorStore:
     return VectorStore.from_url(
         settings.qdrant_url,
@@ -52,4 +71,9 @@ def build_service(settings: Settings, store: VectorStore) -> RagService:
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         top_k=settings.top_k,
+        lexical=LexicalIndex(),
+        reranker=build_reranker(settings),
+        mode=settings.retrieval_mode,
+        rrf_k=settings.rrf_k,
+        candidate_multiplier=settings.candidate_multiplier,
     )
